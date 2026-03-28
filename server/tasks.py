@@ -1,6 +1,9 @@
 from dataclasses import dataclass
 
-from ..models import ISSUE_TAXONOMY
+try:
+    from ..models import ISSUE_TAXONOMY
+except ImportError:
+    from models import ISSUE_TAXONOMY
 
 
 @dataclass(frozen=True)

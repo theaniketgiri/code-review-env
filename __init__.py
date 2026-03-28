@@ -7,10 +7,23 @@
 """Code Review Env Environment."""
 
 from .client import CodeReviewEnv
-from .models import CodeReviewAction, CodeReviewObservation
+from .models import (
+    ISSUE_TAXONOMY,
+    CodeReviewAction,
+    CodeReviewObservation,
+    CodeReviewState,
+    ReviewAction,
+    ReviewObservation,
+    ReviewState,
+)
 
 __all__ = [
+    "ISSUE_TAXONOMY",
+    "ReviewAction",
+    "ReviewObservation",
+    "ReviewState",
     "CodeReviewAction",
     "CodeReviewObservation",
+    "CodeReviewState",
     "CodeReviewEnv",
 ]

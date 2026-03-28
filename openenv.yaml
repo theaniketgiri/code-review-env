@@ -1,5 +1,17 @@
 spec_version: 1
-name: code_review_env
+name: code-review-env
+version: "1.0.0"
+description: >
+	A code review agent environment where an AI agent reads buggy Python code
+	and learns to identify security vulnerabilities, logic errors, and code smells.
+	Simulates the real-world software engineering task of pull request review.
+author: YOUR_HF_USERNAME
+tasks:
+	- task_easy
+	- task_medium
+	- task_hard
+sdk: gradio
+sdk_version: "4.0"
 type: space
 runtime: fastapi
 app: server.app:app

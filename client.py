@@ -4,96 +4,53 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-"""Code Review Env Environment Client."""
+"""Client for the Code Review OpenEnv environment."""
 
-from typing import Dict
+from typing import Any
 
 from openenv.core import EnvClient
 from openenv.core.client_types import StepResult
-from openenv.core.env_server.types import State
 
-from .models import CodeReviewAction, CodeReviewObservation
+try:
+    from .models import ReviewAction, ReviewObservation, ReviewState
+except ImportError:
+    from models import ReviewAction, ReviewObservation, ReviewState
 
 
-class CodeReviewEnv(
-    EnvClient[CodeReviewAction, CodeReviewObservation, State]
-):
-    """
-    Client for the Code Review Env Environment.
+class CodeReviewEnv(EnvClient[ReviewAction, ReviewObservation, ReviewState]):
+    """WebSocket client for interacting with the code review environment."""
 
-    This client maintains a persistent WebSocket connection to the environment server,
-    enabling efficient multi-step interactions with lower latency.
-    Each client instance has its own dedicated environment session on the server.
-
-    Example:
-        >>> # Connect to a running server
-        >>> with CodeReviewEnv(base_url="http://localhost:8000") as client:
-        ...     result = client.reset()
-        ...     print(result.observation.echoed_message)
-        ...
-        ...     result = client.step(CodeReviewAction(message="Hello!"))
-        ...     print(result.observation.echoed_message)
-
-    Example with Docker:
-        >>> # Automatically start container and connect
-        >>> client = CodeReviewEnv.from_docker_image("code_review_env-env:latest")
-        >>> try:
-        ...     result = client.reset()
-        ...     result = client.step(CodeReviewAction(message="Test"))
-        ... finally:
-        ...     client.close()
-    """
-
-    def _step_payload(self, action: CodeReviewAction) -> Dict:
-        """
-        Convert CodeReviewAction to JSON payload for step message.
-
-        Args:
-            action: CodeReviewAction instance
-
-        Returns:
-            Dictionary representation suitable for JSON encoding
-        """
+    def _step_payload(self, action: ReviewAction) -> dict[str, Any]:
         return {
-            "message": action.message,
+            "review_comment": action.review_comment,
+            "issues_found": action.issues_found,
+            "severity": action.severity,
         }
 
-    def _parse_result(self, payload: Dict) -> StepResult[CodeReviewObservation]:
-        """
-        Parse server response into StepResult[CodeReviewObservation].
-
-        Args:
-            payload: JSON response data from server
-
-        Returns:
-            StepResult with CodeReviewObservation
-        """
+    def _parse_result(self, payload: dict[str, Any]) -> StepResult[ReviewObservation]:
         obs_data = payload.get("observation", {})
-        observation = CodeReviewObservation(
-            echoed_message=obs_data.get("echoed_message", ""),
-            message_length=obs_data.get("message_length", 0),
+        observation = ReviewObservation(
+            task_id=obs_data.get("task_id", "task_easy"),
+            file_name=obs_data.get("file_name", ""),
+            task_description=obs_data.get("task_description", ""),
+            code_snippet=obs_data.get("code_snippet", ""),
+            feedback=obs_data.get("feedback", ""),
+            step_number=obs_data.get("step_number", 0),
+            available_issue_tags=obs_data.get("available_issue_tags", []),
             done=payload.get("done", False),
             reward=payload.get("reward"),
             metadata=obs_data.get("metadata", {}),
         )
-
         return StepResult(
             observation=observation,
             reward=payload.get("reward"),
             done=payload.get("done", False),
         )
 
-    def _parse_state(self, payload: Dict) -> State:
-        """
-        Parse server response into State object.
-
-        Args:
-            payload: JSON response from state request
-
-        Returns:
-            State object with episode_id and step_count
-        """
-        return State(
-            episode_id=payload.get("episode_id"),
+    def _parse_state(self, payload: dict[str, Any]) -> ReviewState:
+        return ReviewState(
+            episode_id=payload.get("episode_id", ""),
             step_count=payload.get("step_count", 0),
+            current_task_id=payload.get("current_task_id", "task_easy"),
+            max_steps=payload.get("max_steps", 3),
         )

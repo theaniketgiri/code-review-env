@@ -22,7 +22,7 @@ try:
     from .code_review_env_environment import CodeReviewEnvironment
     from .graders import grade_review
     from .tasks import TASKS, Task, get_task
-except ModuleNotFoundError:
+except ImportError:
     from models import ReviewAction, ReviewObservation
     from server.code_review_env_environment import CodeReviewEnvironment
     from server.graders import grade_review

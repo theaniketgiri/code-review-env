@@ -2,10 +2,17 @@ import json
 import os
 import re
 import sys
+from collections.abc import Callable
 from typing import Any
 
-import httpx
 from openai import OpenAI
+
+try:
+    from .client import CodeReviewEnv
+    from .models import ReviewAction
+except ImportError:
+    from client import CodeReviewEnv
+    from models import ReviewAction
 
 
 TASK_IDS = ["task_easy", "task_medium", "task_hard"]
@@ -13,7 +20,7 @@ DEFAULT_ENV_URL = "http://localhost:8000"
 DEFAULT_MODEL = "gpt-4o-mini"
 
 
-DETECTION_RULES: dict[str, callable] = {
+DETECTION_RULES: dict[str, Callable[[str], bool]] = {
     "null_pointer": lambda code: ".get(" in code or "= None" in code,
     "missing_return": lambda code: "# todo: return" in code.lower(),
     "sql_injection": lambda code: (
@@ -134,16 +141,14 @@ def run_baseline() -> dict[str, dict[str, Any]]:
 
     results: dict[str, dict[str, Any]] = {}
 
-    with httpx.Client(timeout=30.0) as client:
+    with CodeReviewEnv(base_url=env_url).sync() as env:
         for task_id in TASK_IDS:
-            reset_response = client.post(f"{env_url}/reset", json={"task_id": task_id})
-            reset_response.raise_for_status()
-            reset_payload = reset_response.json()
+            reset_result = env.reset(task_id=task_id)
+            observation = reset_result.observation
 
-            observation = reset_payload.get("observation", {})
-            code_snippet = str(observation.get("code_snippet", ""))
-            file_name = str(observation.get("file_name", ""))
-            task_description = str(observation.get("task_description", ""))
+            code_snippet = observation.code_snippet
+            file_name = observation.file_name
+            task_description = observation.task_description
 
             action_payload: dict[str, Any]
             if openai_client:
@@ -161,11 +166,8 @@ def run_baseline() -> dict[str, dict[str, Any]]:
             else:
                 action_payload = build_rule_action(code_snippet)
 
-            step_response = client.post(f"{env_url}/step", json={"action": action_payload})
-            step_response.raise_for_status()
-            step_payload = step_response.json()
-
-            score = float(step_payload.get("reward") or 0.0)
+            step_result = env.step(ReviewAction.model_validate(action_payload))
+            score = float(step_result.reward or 0.0)
             results[task_id] = {
                 "score": score,
                 "issues_found": action_payload.get("issues_found", []),
