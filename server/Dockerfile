@@ -9,10 +9,10 @@ FROM ${BASE_IMAGE}
 
 WORKDIR /app
 
-COPY server/requirements.txt /tmp/requirements.txt
+COPY requirements.txt /tmp/requirements.txt
 RUN pip install --no-cache-dir -r /tmp/requirements.txt
 
-COPY . /app/
+COPY . /app/server/
 
 # Health check
 HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
