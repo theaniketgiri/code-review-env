@@ -6,14 +6,14 @@ WORKDIR /app
 # Install uv for fast dependency resolution
 COPY --from=ghcr.io/astral-sh/uv:0.4 /uv /bin/uv
 
-# Copy definition files first to leverage Docker cache
+# Copy definition files and application files
 COPY pyproject.toml uv.lock ./
+COPY . .
 
-# Install python dependencies natively
+# Install python dependencies natively and build the project
 RUN uv sync --frozen
 
-# Copy the rest of the application files
-COPY . .
+# (Already copied)
 
 # Set environment variables for OpenEnv runtime
 ENV PYTHONPATH=/app
