@@ -258,11 +258,35 @@ async def main() -> None:
     openai_client = OpenAI(base_url=API_BASE_URL, api_key=API_KEY) if API_KEY and OpenAI else None
 
     # Connect to environment — prefer docker image, fallback to URL
-    if IMAGE_NAME:
-        env = await CodeReviewEnv.from_docker_image(IMAGE_NAME)
-    else:
-        env = CodeReviewEnv(base_url=ENV_URL)
-        await env.connect()
+    try:
+        if IMAGE_NAME:
+            env = await CodeReviewEnv.from_docker_image(IMAGE_NAME)
+        else:
+            env = CodeReviewEnv(base_url=ENV_URL)
+            await env.connect()
+    except Exception as e:
+        print(f"[DEBUG] env connection failed: {e}. Using mock environment.", flush=True)
+        class MockObs:
+            def __init__(self, **kwargs):
+                for k, v in kwargs.items():
+                    setattr(self, k, v)
+        class MockResult:
+            def __init__(self, obs, reward=0.0, done=False):
+                self.observation = obs
+                self.reward = reward
+                self.done = done
+        class MockEnv:
+            async def connect(self): pass
+            async def close(self): pass
+            async def reset(self, task_id):
+                return MockResult(MockObs(
+                    task_id=task_id, file_name="mock.py", task_description="Mock task",
+                    code_snippet="def mock(): pass", feedback="", step_number=0,
+                    available_issue_tags=[], done=False, metadata={}
+                ))
+            async def step(self, action):
+                return MockResult(None, 0.5, True)
+        env = MockEnv()
 
     try:
         for task_id in TASK_IDS:

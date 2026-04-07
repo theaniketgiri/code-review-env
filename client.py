@@ -8,8 +8,12 @@
 
 from typing import Any
 
-from openenv.core import EnvClient
-from openenv.core.client_types import StepResult
+try:
+    from openenv.core import EnvClient
+    from openenv.core.client_types import StepResult
+except ImportError:
+    class EnvClient: pass
+    StepResult = Any
 
 try:
     from .models import ReviewAction, ReviewObservation, ReviewState
