@@ -11,7 +11,7 @@ from collections.abc import Callable
 from pydantic import BaseModel, Field
 
 try:
-    from openenv.core.env_server.http_server import create_fastapi_app
+    from openenv.core.env_server.http_server import create_app
 except Exception as e:  # pragma: no cover
     raise ImportError(
         "openenv is required for the web interface. Install dependencies with '\n    uv sync\n'"
@@ -33,7 +33,7 @@ def _env_factory() -> CodeReviewEnvironment:
     return CodeReviewEnvironment()
 
 
-app = create_fastapi_app(
+app = create_app(
     _env_factory,
     ReviewAction,
     ReviewObservation,
