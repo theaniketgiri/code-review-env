@@ -1,4 +1,20 @@
 ---
+title: Code Review Environment
+emoji: 🛡️
+colorFrom: blue
+colorTo: purple
+sdk: docker
+app_port: 8000
+pinned: false
+license: bsd-3-clause
+short_description: OpenEnv benchmark for AI-driven code review with taxonomy-based grading
+tags:
+  - openenv
+  - reinforcement-learning
+  - code-review
+---
+
+<!-- Banner -->
 <div align="center">
 
 # Code Review Environment
