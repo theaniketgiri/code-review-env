@@ -1,19 +1,160 @@
-spec_version: 1
 name: code-review-env
-version: "1.0.0"
+version: 1.0.0
 description: >
-  A code review agent environment where an AI agent reads buggy Python code
-  and learns to identify security vulnerabilities, logic errors, and code smells.
-  Simulates the real-world software engineering task of pull request review.
+  An OpenEnv benchmark where an AI agent reviews buggy Python code and learns
+  to identify security vulnerabilities, logic errors, and code smells using a
+  fixed taxonomy of issue tags.  Simulates the real-world software engineering
+  task of pull-request review with deterministic, multi-dimensional grading.
 author: Dolphin-Syndrom
-tasks:
-  - task_easy
-  - task_medium
-  - task_hard
-sdk: gradio
-sdk_version: "4.0"
-type: space
-runtime: fastapi
-app: server.app:app
-port: 8000
+license: BSD-3-Clause
 
+spec:
+  observation_space:
+    task_id:
+      type: string
+      description: Current task identifier (task_easy, task_medium, task_hard)
+    file_name:
+      type: string
+      description: File name associated with the code snippet under review
+    task_description:
+      type: string
+      description: Instructions describing what the agent should review and return
+    code_snippet:
+      type: string
+      description: Python code snippet containing planted issues for review
+    feedback:
+      type: string
+      description: Grading feedback for the most recent action or startup guidance after reset
+    step_number:
+      type: integer
+      description: Current step number within the episode (starts at 0 after reset)
+    available_issue_tags:
+      type: array
+      description: >
+        Allowed issue tags the agent can use in issues_found —
+        null_pointer, missing_return, type_error, index_out_of_bounds,
+        sql_injection, hardcoded_secret, missing_input_validation,
+        race_condition, timing_attack, improper_error_handling,
+        integer_overflow, path_traversal
+
+  action_space:
+    review:
+      type: object
+      properties:
+        review_comment:
+          type: string
+          description: Human-readable review explaining identified issues and suggested fixes
+        issues_found:
+          type: array
+          items:
+            type: string
+          description: List of issue tags found by the agent, chosen from ISSUE_TAXONOMY
+        severity:
+          type: string
+          enum: [low, medium, high, critical]
+          description: Overall severity level assessed by the agent
+      required: [review_comment, issues_found, severity]
+
+  reward_range: [0.0, 1.0]
+  max_steps: 3
+
+tasks:
+  task_easy:
+    name: Easy — Null Pointer & Missing Return
+    description: >
+      Review a simple user-service function for a null-pointer dereference
+      and a missing return statement.
+    difficulty: easy
+    planted_issues: [null_pointer, missing_return]
+    grader:
+      type: deterministic
+      scoring: >
+        base = |correct ∩ planted| / |planted|;
+        bonus = +0.05 per correct issue with keyword match in comment;
+        penalty = −0.1 per false-positive;
+        score = clamp(base + bonus − penalty, 0.0, 1.0)
+
+  task_medium:
+    name: Medium — SQL Injection & Hardcoded Secret
+    description: >
+      Review an authentication module for SQL injection via f-string
+      interpolation and a hardcoded secret key.
+    difficulty: medium
+    planted_issues: [sql_injection, hardcoded_secret]
+    grader:
+      type: deterministic
+      scoring: >
+        base = |correct ∩ planted| / |planted|;
+        bonus = +0.05 per correct issue with keyword match in comment;
+        penalty = −0.1 per false-positive;
+        score = clamp(base + bonus − penalty, 0.0, 1.0)
+
+  task_hard:
+    name: Hard — Race Condition, Error Handling & Timing Attack
+    description: >
+      Review a payment-processing function for a non-atomic
+      balance check-and-decrement (race condition), a bare except that
+      silently swallows payment errors, and a non-constant-time
+      token comparison (timing attack).
+    difficulty: hard
+    planted_issues: [race_condition, improper_error_handling, timing_attack]
+    grader:
+      type: deterministic
+      scoring: >
+        base = |correct ∩ planted| / |planted|;
+        bonus = +0.05 per correct issue with keyword match in comment;
+        penalty = −0.1 per false-positive;
+        score = clamp(base + bonus − penalty, 0.0, 1.0)
+
+reward_function:
+  summary:
+    - Dense rewards are provided per step so agents receive signal across the full trajectory.
+    - Final task scores are deterministic and normalized to 0.0–1.0 by the graders.
+  components:
+    recall_reward:
+      description: >
+        Fractional reward proportional to |correctly found issues| / |planted issues|.
+        This is the primary learning signal encouraging comprehensive detection.
+    quality_bonus:
+      value: +0.05
+      description: >
+        Per correctly-found issue whose associated keywords appear in the
+        agent's free-text review_comment (e.g. "sql" for sql_injection).
+    precision_penalty:
+      value: -0.10
+      description: >
+        Per false-positive issue tag submitted. Discourages hallucinated
+        or overly aggressive flagging.
+
+server:
+  host: 0.0.0.0
+  port: 8000
+  entrypoint: server.app:app
+  endpoints:
+    - GET  /health
+    - GET  /tasks
+    - POST /reset
+    - POST /step
+    - GET  /state
+    - POST /grader
+    - POST /baseline
+    - GET  /ws
+
+dependencies:
+  python: ">=3.10"
+  packages:
+    - openenv-core[core]>=0.2.2
+    - openai>=1.0
+    - httpx>=0.24.0
+    - plotly>=6.6.0
+    - pandas>=2.3.3
+    - gradio>=4.0
+    - pydantic>=2.0.0
+    - uvicorn>=0.24.0
+    - fastapi>=0.104.0
+
+validation:
+  openenv_spec: true
+  docker_build: true
+  baseline_reproducible: true
+  tasks_count: 3
