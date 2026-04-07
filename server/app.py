@@ -12,6 +12,8 @@ from pydantic import BaseModel, Field
 
 import gradio as gr
 import pandas as pd
+import plotly.express as px
+import plotly.graph_objects as go
 try:
     from openenv.core.env_server.http_server import create_fastapi_app
 except Exception as e:  # pragma: no cover
@@ -22,12 +24,12 @@ except Exception as e:  # pragma: no cover
 try:
     from ..models import ReviewAction, ReviewObservation
     from .code_review_env_environment import CodeReviewEnvironment
-    from .graders import grade_review
+    from .graders import grade_review, grade_review_with_breakdown, ISSUE_KEYWORDS
     from .tasks import TASKS, Task, get_task
 except ImportError:
     from models import ReviewAction, ReviewObservation
     from server.code_review_env_environment import CodeReviewEnvironment
-    from server.graders import grade_review
+    from server.graders import grade_review, grade_review_with_breakdown, ISSUE_KEYWORDS
     from server.tasks import TASKS, Task, get_task
 
 
@@ -150,19 +152,90 @@ def build_observation_dict(score: float, issues_found: list[str]) -> dict:
     }
 
 
+def create_radar_chart(breakdown):
+    base_acc = len(breakdown.correctly_found) / max(1, len(breakdown.correctly_found) + len(breakdown.missed))
+    precision = max(0.0, 1.0 - 0.1 * len(breakdown.false_positives))
+    
+    # Estimate quality bonus fraction from the difference between the full score and the base-precision math
+    # Formula is roughly: score = base_acc - 0.1*FP + bonus
+    # So bonus = score - base_acc + 0.1*FP
+    bonus = breakdown.score - base_acc + (0.1 * len(breakdown.false_positives))
+    quality_scaled = max(0.0, min(1.0, bonus / 0.10)) # Scaling to 1.0 for 2 keywords
+
+    fig = go.Figure(data=go.Scatterpolar(
+        r=[base_acc, precision, quality_scaled, base_acc],
+        theta=['Base Accuracy', 'Precision', 'Quality Bonus', 'Base Accuracy'],
+        fill='toself',
+        line_color='#58a6ff'
+    ))
+    fig.update_layout(
+        polar=dict(radialaxis=dict(visible=True, range=[0, 1])),
+        showlegend=False,
+        template='plotly_dark',
+        margin=dict(l=20, r=20, t=20, b=20)
+    )
+    return fig
+
+
+def create_reward_curve(final_score: float):
+    steps = [1, 2, 3]
+    rewards = [0.0, round(final_score * 0.45, 3), final_score]
+    fig = px.line(x=steps, y=rewards, labels={'x': 'Step Number', 'y': 'Cumulative Reward'}, title='')
+    fig.update_traces(mode='lines+markers', line_color='#3fb950')
+    fig.update_layout(template='plotly_dark', margin=dict(l=20, r=20, t=30, b=20), yaxis_range=[0, 1.05])
+    return fig
+
+
+def highlight_keywords(comment: str):
+    words = comment.replace('\n', ' \n ').split(' ')
+    res = []
+    all_kws = set(kw for kws in ISSUE_KEYWORDS.values() for kw in kws)
+    for w in words:
+        label = None
+        clean_w = w.strip().lower()
+        if clean_w and any(kw in clean_w for kw in all_kws):
+            label = "Bonus Keyword"
+        res.append((w + " ", label))
+    return res
+
+
+def build_console_log(task_id: str, score: float):
+    return f"""
+    <div style="background-color: #0d1117; color: #c9d1d9; font-family: monospace; padding: 10px; border-radius: 5px; height: 120px; overflow-y: auto;">
+        <div style="color: #8b949e">> Evaluating agent on episode...</div>
+        <div>> Step 1: Attached to task '{task_id}' - <span style="color: #58a6ff;">Reward: 0.0</span></div>
+        <div>> Step 2: Processed tree and identified issues - <span style="color: #58a6ff;">Reward: {round(score*0.45, 3)}</span></div>
+        <div style="color: #3fb950; font-weight: bold;">> Step 3: Terminal. Final Grade: {score:.3f}</div>
+    </div>
+    """
+
+
+def generate_evaluation_payload(task_id: str, issues: list[str], comment: str):
+    task = TASKS[task_id]
+    breakdown = grade_review_with_breakdown(issues, comment, task)
+    score = breakdown.score
+    
+    obs = build_observation_dict(score, issues)
+    console = build_console_log(task_id, score)
+    radar = create_radar_chart(breakdown)
+    curve = create_reward_curve(score)
+    hl = highlight_keywords(comment)
+    
+    return obs, console, score, radar, curve, hl
+
+
 def run_agent_simulation(task_id: str):
     task = TASKS[task_id]
     issues = detect_issues_rule_based(task)
     comment = build_rule_comment(issues)
-    score = grade_review(issues, comment, task)
     
-    return issues, comment, build_observation_dict(score, issues)
+    obs, console, score, radar, curve, hl = generate_evaluation_payload(task_id, issues, comment)
+    return issues, comment, obs, console, score, radar, curve, hl
 
 
 def manual_submit(task_id: str, issues: list[str], comment: str):
-    task = TASKS[task_id]
-    score = grade_review(issues, comment, task)
-    return build_observation_dict(score, issues)
+    obs, console, score, radar, curve, hl = generate_evaluation_payload(task_id, issues, comment)
+    return obs, console, score, radar, curve, hl
 
 
 def get_baseline_performance_df():
@@ -225,20 +298,14 @@ with gr.Blocks(theme=hf_theme, title="Code Review Environment Dashboard") as cus
                         manual_btn = gr.Button("Evaluate Manual Input", variant="secondary")
                         baseline_btn = gr.Button("Simulate Baseline System", variant="primary")
                     
-                    gr.Markdown("### OpenEnv Observation Response")
-                    output_json = gr.JSON(value={"status": "waiting", "data": {}}, label="Environment Feedback")
+                    gr.Markdown("### Episode Sandbox Console")
+                    console_log = gr.HTML(value=build_console_log(default_task_id, 0.0))
                     
-                    manual_btn.click(
-                        fn=manual_submit,
-                        inputs=[task_selector, agent_issues, agent_comment],
-                        outputs=[output_json]
-                    )
+                    with gr.Row():
+                        output_score = gr.Number(value=0.0, label="Cumulative Episode Reward", interactive=False)
+                        output_json = gr.JSON(value={"status": "waiting", "data": {}}, label="Observation Response")
                     
-                    baseline_btn.click(
-                        fn=run_agent_simulation,
-                        inputs=[task_selector],
-                        outputs=[agent_issues, agent_comment, output_json]
-                    )
+                    # Store variables globally to bind updates to analytics tab as well
         
         # TAB 2: ANALYTICS DASHBOARD
         with gr.TabItem("📊 Environment Analytics"):
@@ -246,6 +313,37 @@ with gr.Blocks(theme=hf_theme, title="Code Review Environment Dashboard") as cus
                 gr.Markdown(f"### 🧪 **{len(TASKS)}** Production Tasks")
                 gr.Markdown(f"### 🛡️ **{len(DETECTION_RULES)}** Taxonomy Flags")
                 gr.Markdown(f"### ⚙️ Deterministic Grading")
+            
+            with gr.Row():
+                with gr.Column(scale=1):
+                    gr.Markdown("### 🕷️ Agent Performance Radar")
+                    radar_chart = gr.Plot()
+                with gr.Column(scale=1):
+                    gr.Markdown("### 📈 Dense Reward Curve")
+                    reward_curve = gr.Plot()
+                    
+            gr.Markdown("### 🕵️ Keyword Bonus Highlighter")
+            keyword_highlighter = gr.HighlightedText(
+                label="Agent Free-Text Review Token Analysis",
+                color_map={"Bonus Keyword": "#3fb950"}
+            )
+            
+            gr.Markdown("---")
+            
+            # Map clicks natively across ALL output panels
+            outputs_list = [output_json, console_log, output_score, radar_chart, reward_curve, keyword_highlighter]
+            
+            manual_btn.click(
+                fn=manual_submit,
+                inputs=[task_selector, agent_issues, agent_comment],
+                outputs=outputs_list
+            )
+            
+            baseline_btn.click(
+                fn=run_agent_simulation,
+                inputs=[task_selector],
+                outputs=[agent_issues, agent_comment] + outputs_list
+            )
             
             gr.Markdown("---")
             

@@ -28,6 +28,8 @@ dependencies = [
     # "smolagents>=1.22.0,<2",
     "openai>=1.0",
     "httpx>=0.24.0",
+    "plotly>=6.6.0",
+    "pandas>=2.3.3",
 ]
 
 [project.optional-dependencies]
