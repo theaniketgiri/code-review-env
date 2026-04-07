@@ -6,7 +6,6 @@ colorTo: purple
 sdk: docker
 pinned: false
 app_port: 8000
-base_path: /web
 tags:
   - openenv
   - reinforcement-learning
@@ -91,15 +90,39 @@ curl -X POST http://localhost:8000/grader \
 1. LLM mode (if `OPENAI_API_KEY` is set)
 2. Rule-based fallback (no key required)
 
+### Mandatory Additional Instructions
+
+Before submitting, ensure the following variables are defined in your environment configuration:
+
+- `API_BASE_URL` — The API endpoint for the LLM.
+- `MODEL_NAME` — The model identifier to use for inference.
+- `HF_TOKEN` — Your Hugging Face / API key.
+
+Additional mandatory requirements:
+
+- The inference script must be named `inference.py` and placed in the root directory of the project.
+- Participants must use OpenAI Client for all LLM calls using the variables above.
+- Participants must emit structured stdout logs following `[START]`, `[STEP]`, and `[END]` format from the sample guidance.
+
+This repository implements those requirements in `inference.py` while still supporting fallback behavior when no API key is provided.
+
 ```bash
 # Local fallback mode
 python inference.py
 
 # Local LLM mode
-OPENAI_API_KEY=sk-... OPENAI_MODEL=gpt-4o-mini python inference.py
+API_BASE_URL=https://api.openai.com/v1 MODEL_NAME=gpt-4o-mini HF_TOKEN=hf_xxx python inference.py
 
 # Against HF Space
 ENV_URL=https://<your-space>.hf.space python inference.py
+```
+
+Structured logs example:
+
+```text
+[START] {"env_url":"http://localhost:8000","api_base_url":"https://api.openai.com/v1","model_name":"gpt-4o-mini","mode":"rule_based","tasks":["task_easy","task_medium","task_hard"]}
+[STEP] {"task_id":"task_easy","mode":"rule_based","issues_found":["null_pointer","missing_return"],"score":1.0}
+[END] {"status":"success","results":{...}}
 ```
 
 Example output shape:
@@ -123,6 +146,15 @@ docker run -p 8000:8000 code-review-env:latest
 
 ```bash
 openenv push --repo-id YOUR_USERNAME/code-review-env
+```
+
+## Pre-validation script
+
+Run the provided pre-validation script before final submission:
+
+```bash
+cd /home/manvith/OpenEnv/code_review_env
+./scripts/validate-submission.sh https://YOUR_USERNAME-code-review-env.hf.space .
 ```
 
 ## Submission links (both required)
