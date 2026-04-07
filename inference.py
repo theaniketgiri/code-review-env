@@ -43,7 +43,10 @@ import time
 from collections.abc import Callable
 from typing import Any, List, Optional
 
-from openai import OpenAI
+try:
+    from openai import OpenAI
+except ImportError:
+    OpenAI = None
 
 try:
     from .client import CodeReviewEnv
@@ -166,7 +169,7 @@ def _extract_json_object(text: str) -> dict[str, Any]:
 
 
 def build_llm_action(
-    client: OpenAI,
+    client: Any,
     model: str,
     task_id: str,
     file_name: str,
@@ -225,7 +228,7 @@ def build_llm_action(
 
 
 def get_action(
-    openai_client: Optional[OpenAI],
+    openai_client: Optional[Any],
     model: str,
     task_id: str,
     file_name: str,
@@ -252,7 +255,7 @@ def get_action(
 # Main inference loop  (async, follows sample script pattern exactly)
 # ---------------------------------------------------------------------------
 async def main() -> None:
-    openai_client = OpenAI(base_url=API_BASE_URL, api_key=API_KEY) if API_KEY else None
+    openai_client = OpenAI(base_url=API_BASE_URL, api_key=API_KEY) if API_KEY and OpenAI else None
 
     # Connect to environment — prefer docker image, fallback to URL
     if IMAGE_NAME:
