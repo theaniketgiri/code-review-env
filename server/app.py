@@ -11,6 +11,7 @@ from collections.abc import Callable
 from pydantic import BaseModel, Field
 
 import gradio as gr
+import pandas as pd
 try:
     from openenv.core.env_server.http_server import create_fastapi_app
 except Exception as e:  # pragma: no cover
@@ -137,21 +138,53 @@ def update_task_view(task_id: str):
     return desc_md, task.code
 
 
+def build_observation_dict(score: float, issues_found: list[str]) -> dict:
+    # Mimics actual agent OpenEnv observation output
+    return {
+        "status": "success",
+        "data": {
+            "evaluation_score": round(score, 3),
+            "true_issues_resolved": len(issues_found),
+            "message": "Grading simulation completed."
+        }
+    }
+
+
 def run_agent_simulation(task_id: str):
     task = TASKS[task_id]
     issues = detect_issues_rule_based(task)
     comment = build_rule_comment(issues)
     score = grade_review(issues, comment, task)
     
-    score_md = f"### 🤖 Agent simulated successfully\n\n**Calculated Score:** `{score:.3f}`  \n**Issues Found:** {', '.join(issues) if issues else 'None'}"
-    return issues, comment, score, score_md
+    return issues, comment, build_observation_dict(score, issues)
 
 
 def manual_submit(task_id: str, issues: list[str], comment: str):
     task = TASKS[task_id]
     score = grade_review(issues, comment, task)
-    score_md = f"### 📝 Manual review parsed\n\n**Calculated Score:** `{score:.3f}`"
-    return score, score_md
+    return build_observation_dict(score, issues)
+
+
+def get_baseline_performance_df():
+    data = []
+    for t_id, task in TASKS.items():
+        issues = detect_issues_rule_based(task)
+        score = grade_review(issues, build_rule_comment(issues), task)
+        data.append({"Task Matrix": t_id, "Difficulty": task.difficulty, "Baseline Score (0-1.0)": score})
+    return pd.DataFrame(data)
+
+
+def get_ground_truth_df():
+    data = []
+    for t_id, task in TASKS.items():
+        data.append({
+            "Task Matrix": t_id,
+            "Difficulty": task.difficulty,
+            "Target File": task.file_name,
+            "Ground Truth Issues": ", ".join(task.planted_issues)
+        })
+    return pd.DataFrame(data)
+
 
 hf_theme = gr.themes.Monochrome(
     font=[gr.themes.GoogleFont("Inter"), "ui-sans-serif", "system-ui", "sans-serif"],
@@ -160,47 +193,87 @@ hf_theme = gr.themes.Monochrome(
     text_size=gr.themes.sizes.text_md,
 )
 
-with gr.Blocks(theme=hf_theme, title="Code Review Environment") as custom_ui:
-    gr.Markdown("# 🛡️ Code Review Agent Simulator", elem_id="header")
-    gr.Markdown("Evaluate LLM agent performance on deterministic code review tasks with immediate rule-based grading.")
+with gr.Blocks(theme=hf_theme, title="Code Review Environment Dashboard") as custom_ui:
+    gr.Markdown("# 🛡️ Code Review Environment", elem_id="header")
     
-    with gr.Row():
-        with gr.Column(scale=5):
-            default_task_id = list(TASKS.keys())[0]
-            t = TASKS[default_task_id]
-            
-            task_selector = gr.Dropdown(label="Select Task Matrix", choices=list(TASKS.keys()), value=default_task_id)
-            task_desc = gr.Markdown(value=f"**File:** `{t.file_name}` | **Difficulty:** `{t.difficulty}`\n\n{t.description}")
-            task_code = gr.Code(language="python", value=t.code, interactive=False, label="Environment File")
-            
-            task_selector.change(
-                fn=update_task_view,
-                inputs=task_selector,
-                outputs=[task_desc, task_code]
-            )
-
-        with gr.Column(scale=4):
-            gr.Markdown("### Agent Output Sandbox")
-            agent_issues = gr.CheckboxGroup(label="Taxonomy Tags Outputted by Agent", choices=list(DETECTION_RULES.keys()))
-            agent_comment = gr.Textbox(label="Agent Review Comment", lines=4, placeholder="The agent's freeform text response goes here...")
+    with gr.Tabs():
+        # TAB 1: INTERACTIVE PLAYGROUND
+        with gr.TabItem("🎮 Agent Evaluation Playground"):
+            gr.Markdown("Directly evaluate agents and deterministic code-review tasks through the environment proxy window.")
             
             with gr.Row():
-                manual_btn = gr.Button("Evaluate Manual Input", variant="secondary")
-                baseline_btn = gr.Button("Simulate Baseline Agent", variant="primary")
+                with gr.Column(scale=5):
+                    default_task_id = list(TASKS.keys())[0]
+                    t = TASKS[default_task_id]
+                    
+                    task_selector = gr.Dropdown(label="Select Task Matrix", choices=list(TASKS.keys()), value=default_task_id)
+                    task_desc = gr.Markdown(value=f"**File:** `{t.file_name}` | **Difficulty:** `{t.difficulty}`\n\n{t.description}")
+                    task_code = gr.Code(language="python", value=t.code, interactive=False, label="Environment File")
+                    
+                    task_selector.change(
+                        fn=update_task_view,
+                        inputs=task_selector,
+                        outputs=[task_desc, task_code]
+                    )
+        
+                with gr.Column(scale=4):
+                    gr.Markdown("### Agent Output Sandbox")
+                    agent_issues = gr.CheckboxGroup(label="Taxonomy Tags Outputted by Agent", choices=list(DETECTION_RULES.keys()))
+                    agent_comment = gr.Textbox(label="Agent Review Comment", lines=3, placeholder="The agent's freeform text response goes here...")
+                    
+                    with gr.Row():
+                        manual_btn = gr.Button("Evaluate Manual Input", variant="secondary")
+                        baseline_btn = gr.Button("Simulate Baseline System", variant="primary")
+                    
+                    gr.Markdown("### OpenEnv Observation Response")
+                    output_json = gr.JSON(value={"status": "waiting", "data": {}}, label="Environment Feedback")
+                    
+                    manual_btn.click(
+                        fn=manual_submit,
+                        inputs=[task_selector, agent_issues, agent_comment],
+                        outputs=[output_json]
+                    )
+                    
+                    baseline_btn.click(
+                        fn=run_agent_simulation,
+                        inputs=[task_selector],
+                        outputs=[agent_issues, agent_comment, output_json]
+                    )
+        
+        # TAB 2: ANALYTICS DASHBOARD
+        with gr.TabItem("📊 Environment Analytics"):
+            with gr.Row():
+                gr.Markdown(f"### 🧪 **{len(TASKS)}** Production Tasks")
+                gr.Markdown(f"### 🛡️ **{len(DETECTION_RULES)}** Taxonomy Flags")
+                gr.Markdown(f"### ⚙️ Deterministic Grading")
             
-            output_score_slider = gr.Slider(minimum=0.0, maximum=1.0, value=0.0, label="Task Grader Score", interactive=False)
-            output_markdown = gr.Markdown(value="_Waiting for action..._")
+            gr.Markdown("---")
             
-            manual_btn.click(
-                fn=manual_submit,
-                inputs=[task_selector, agent_issues, agent_comment],
-                outputs=[output_score_slider, output_markdown]
-            )
+            with gr.Row():
+                with gr.Column(scale=1):
+                    gr.Markdown("### 📈 Baseline Policy Evaluation")
+                    gr.Markdown("This chart renders a real-time `gr.BarPlot` showing the default rule-based LLM scanner performance across testing tasks in the environment. Agents must eclipse this score to be considered frontier models.")
+                    bar_plot = gr.BarPlot(
+                        value=get_baseline_performance_df(),
+                        x="Task Matrix",
+                        y="Baseline Score (0-1.0)",
+                        color="Difficulty",
+                        title="Scores by Agent Baseline"
+                    )
+                    
+                with gr.Column(scale=1):
+                    gr.Markdown("### 🗃️ Ground Truth Map")
+                    gr.Markdown("The underlying ground truth configuration natively driving the environment metrics.")
+                    db_view = gr.DataFrame(value=get_ground_truth_df())
             
-            baseline_btn.click(
-                fn=run_agent_simulation,
-                inputs=[task_selector],
-                outputs=[agent_issues, agent_comment, output_score_slider, output_markdown]
+            gr.Markdown("---")
+            
+            gr.Markdown(
+                "### ⚖️ Multi-Tier Evaluation Policy\n\n"
+                "The environment utilizes a robust, deterministic multi-dimensional reward function mimicking senior engineering review standards:\n\n"
+                "1. **Recall Reward (True Positives)**: Agents gain heavy fractional rewards specifically for correctly identifying underlying seeded vulnerabilities from the core taxonomy.\n"
+                "2. **Precision Penalty (False Positives)**: Hallucinations or overly aggressive linting (identifying bugs that aren't planted) will significantly drag down the score, enforcing conciseness.\n"
+                "3. **Articulation Bonus**: Agents submitting free-text comments highlighting root causes successfully grab a minor articulation bonus representing communication skills."
             )
 
 app = gr.mount_gradio_app(app, custom_ui, path="/")
