@@ -36,7 +36,8 @@ import time
 from collections.abc import Callable
 from typing import Any, Optional
 
-import httpx
+import urllib.request
+import urllib.error
 from openai import OpenAI
 
 # ---------------------------------------------------------------------------
@@ -155,24 +156,21 @@ def log_end(success: bool, steps: int, score: float, rewards: list[float]) -> No
 # ---------------------------------------------------------------------------
 
 
+def _post_json(url: str, payload: dict) -> dict[str, Any]:
+    data = json.dumps(payload).encode('utf-8')
+    req = urllib.request.Request(url, data=data, headers={'Content-Type': 'application/json'}, method='POST')
+    try:
+        with urllib.request.urlopen(req, timeout=30) as f:
+            return json.loads(f.read().decode('utf-8'))
+    except urllib.error.HTTPError as e:
+        raise RuntimeError(f"HTTP {e.code}: {e.read().decode('utf-8')}")
+
 def env_reset(task_id: str) -> dict[str, Any]:
-    resp = httpx.post(
-        f"{ENV_SERVER_URL}/reset",
-        json={"task_id": task_id},
-        timeout=30,
-    )
-    resp.raise_for_status()
-    return resp.json()
+    return _post_json(f"{ENV_SERVER_URL}/reset", {"task_id": task_id})
 
 
 def env_step(action: dict[str, Any]) -> dict[str, Any]:
-    resp = httpx.post(
-        f"{ENV_SERVER_URL}/step",
-        json=action,
-        timeout=30,
-    )
-    resp.raise_for_status()
-    return resp.json()
+    return _post_json(f"{ENV_SERVER_URL}/step", action)
 
 
 def unwrap_step_payload(payload: dict[str, Any]) -> tuple[dict[str, Any], float, bool]:
@@ -321,9 +319,10 @@ def get_action(client: OpenAI, obs: dict[str, Any], step: int) -> dict[str, Any]
 def wait_for_server(timeout: int = 60) -> None:
     for _ in range(timeout):
         try:
-            r = httpx.get(f"{ENV_SERVER_URL}/health", timeout=5)
-            if r.status_code == 200:
-                return
+            req = urllib.request.Request(f"{ENV_SERVER_URL}/health", method="GET")
+            with urllib.request.urlopen(req, timeout=5) as f:
+                if f.status == 200:
+                    return
         except Exception:
             pass
         time.sleep(1)
