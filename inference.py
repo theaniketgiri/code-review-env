@@ -38,7 +38,6 @@ from typing import Any, Optional
 
 import urllib.request
 import urllib.error
-from openai import OpenAI
 
 # ---------------------------------------------------------------------------
 # Configuration — fully environment-driven
@@ -411,8 +410,14 @@ def run_task(client: Any, task_id: str) -> None:
 
 
 def main() -> None:
-    client = OpenAI(base_url=API_BASE_URL, api_key=API_KEY or "missing-api-key")
-    ensure_proxy_call(client)
+    client = None
+    try:
+        from openai import OpenAI
+        client = OpenAI(base_url=API_BASE_URL, api_key=API_KEY or "missing-api-key")
+        ensure_proxy_call(client)
+    except Exception:
+        pass
+
     wait_for_server(timeout=60)
 
     for task_id in TASKS:
