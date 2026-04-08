@@ -36,7 +36,7 @@ import time
 from collections.abc import Callable
 from typing import Any, Optional
 
-import requests
+import httpx
 from openai import OpenAI
 
 # ---------------------------------------------------------------------------
@@ -156,7 +156,7 @@ def log_end(success: bool, steps: int, score: float, rewards: list[float]) -> No
 
 
 def env_reset(task_id: str) -> dict[str, Any]:
-    resp = requests.post(
+    resp = httpx.post(
         f"{ENV_SERVER_URL}/reset",
         json={"task_id": task_id},
         timeout=30,
@@ -166,7 +166,7 @@ def env_reset(task_id: str) -> dict[str, Any]:
 
 
 def env_step(action: dict[str, Any]) -> dict[str, Any]:
-    resp = requests.post(
+    resp = httpx.post(
         f"{ENV_SERVER_URL}/step",
         json=action,
         timeout=30,
@@ -321,7 +321,7 @@ def get_action(client: OpenAI, obs: dict[str, Any], step: int) -> dict[str, Any]
 def wait_for_server(timeout: int = 60) -> None:
     for _ in range(timeout):
         try:
-            r = requests.get(f"{ENV_SERVER_URL}/health", timeout=5)
+            r = httpx.get(f"{ENV_SERVER_URL}/health", timeout=5)
             if r.status_code == 200:
                 return
         except Exception:
