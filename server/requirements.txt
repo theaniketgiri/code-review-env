@@ -4,6 +4,6 @@ uvicorn>=0.24.0
 pydantic>=2.0
 openai>=1.0
 httpx>=0.24.0
-
-
-
+plotly>=6.6.0
+pandas>=2.3.3
+gradio>=4.0
