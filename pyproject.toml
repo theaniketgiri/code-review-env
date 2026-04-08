@@ -30,6 +30,7 @@ dependencies = [
     "httpx>=0.24.0",
     "plotly>=6.6.0",
     "pandas>=2.3.3",
+    "requests>=2.31.0",
 ]
 
 [project.optional-dependencies]

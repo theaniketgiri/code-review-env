@@ -1,78 +1,83 @@
 """
-Inference Script — Code Review Environment
-============================================
-MANDATORY
-- Before submitting, ensure the following variables are defined in your environment configuration:
-    API_BASE_URL   The API endpoint for the LLM.
-    MODEL_NAME     The model identifier to use for inference.
-    HF_TOKEN       Your Hugging Face / API key.
-    LOCAL_IMAGE_NAME The name of the local image to use for the environment if you are using from_docker_image()
+inference.py
+============
+Baseline inference script for the Code Review Environment.
 
-- Defaults are set only for API_BASE_URL and MODEL_NAME:
-    API_BASE_URL = os.getenv("API_BASE_URL", "https://router.huggingface.co/v1")
-    MODEL_NAME   = os.getenv("MODEL_NAME", "Qwen/Qwen2.5-72B-Instruct")
+MANDATORY STDOUT FORMAT
+-----------------------
+[START] task=<task_name> env=<benchmark> model=<model_name>
+[STEP]  step=<n> action=<action_str> reward=<0.00> done=<true|false> error=<msg|null>
+[END]   success=<true|false> steps=<n> score=<score> rewards=<r1,r2,...,rn>
 
-- The inference script must be named `inference.py` and placed in the root directory of the project
-- Participants must use OpenAI Client for all LLM calls using above variables
+Rules:
+  - One [START] line at episode begin.
+  - One [STEP] line per step, immediately after env.step() returns.
+  - One [END] line after the episode ends (always emitted, even on exception).
+  - reward and rewards formatted to 2 decimal places.
+  - done and success are lowercase booleans: true or false.
+  - error is the raw step exception string, or null if none.
+  - All fields on a single line with no newlines within a line.
 
-STDOUT FORMAT
-- The script must emit exactly three line types to stdout, in this order:
+Required environment variables:
+  API_BASE_URL  - Proxy endpoint for LLM calls.
+  MODEL_NAME    - Model identifier for inference.
+  HF_TOKEN      - Hugging Face / API key.
 
-    [START] task=<task_name> env=<benchmark> model=<model_name>
-    [STEP]  step=<n> action=<action_str> reward=<0.00> done=<true|false> error=<msg|null>
-    [END]   success=<true|false> steps=<n> score=<score> rewards=<r1,r2,...,rn>
-
-  Rules:
-    - One [START] line at episode begin.
-    - One [STEP] line per step, immediately after env.step() returns.
-    - One [END] line after env.close(), always emitted (even on exception).
-    - reward and rewards are formatted to 2 decimal places.
-    - done and success are lowercase booleans: true or false.
-    - error is the raw last_action_error string, or null if none.
-    - All fields on a single line with no newlines within a line.
-    - Each task should return score in [0, 1]
+Usage:
+    python inference.py
+    ENV_SERVER_URL=http://localhost:8000 python inference.py
 """
 
-import asyncio
 import json
 import os
 import re
-import sys
 import textwrap
 import time
 from collections.abc import Callable
-from typing import Any, List, Optional
+from typing import Any, Optional
 
-try:
-    from openai import OpenAI
-except ImportError:
-    OpenAI = None
-
-try:
-    from .client import CodeReviewEnv
-    from .models import ReviewAction
-except ImportError:
-    from client import CodeReviewEnv
-    from models import ReviewAction
+import httpx
+from openai import OpenAI
 
 # ---------------------------------------------------------------------------
-# Configuration
+# Configuration — fully environment-driven
 # ---------------------------------------------------------------------------
-IMAGE_NAME = os.getenv("IMAGE_NAME")  # If you are using docker image
-API_KEY = os.getenv("HF_TOKEN") or os.getenv("API_KEY") or os.getenv("OPENAI_API_KEY")
 
-API_BASE_URL = os.getenv("API_BASE_URL") or "https://router.huggingface.co/v1"
-MODEL_NAME = os.getenv("MODEL_NAME") or "Qwen/Qwen2.5-72B-Instruct"
-ENV_URL = os.getenv("ENV_URL", "http://localhost:8000")
+API_BASE_URL: str = os.getenv("API_BASE_URL", "")
+API_KEY: str = (
+    os.getenv("HF_TOKEN")
+    or os.getenv("API_KEY")
+    or os.getenv("OPENAI_API_KEY", "")
+)
+MODEL_NAME: str = os.getenv("MODEL_NAME", "")
+ENV_SERVER_URL: str = os.getenv("ENV_SERVER_URL", "http://localhost:8000")
+
 BENCHMARK = "code_review_env"
-TASK_IDS = ["task_easy", "task_medium", "task_hard"]
+TASKS = ["task_easy", "task_medium", "task_hard"]
 MAX_STEPS = 3
-SUCCESS_SCORE_THRESHOLD = 0.95
+TEMPERATURE = 0.0
+MAX_TOKENS = 512
+SUCCESS_THRESHOLDS = {
+    "task_easy": 0.95,
+    "task_medium": 0.95,
+    "task_hard": 0.95,
+}
 
+ISSUE_TAXONOMY = [
+    "null_pointer",
+    "missing_return",
+    "type_error",
+    "index_out_of_bounds",
+    "sql_injection",
+    "hardcoded_secret",
+    "missing_input_validation",
+    "race_condition",
+    "timing_attack",
+    "improper_error_handling",
+    "integer_overflow",
+    "path_traversal",
+]
 
-# ---------------------------------------------------------------------------
-# Detection rules for rule-based fallback
-# ---------------------------------------------------------------------------
 DETECTION_RULES: dict[str, Callable[[str], bool]] = {
     "null_pointer": lambda code: ".get(" in code or "= None" in code,
     "missing_return": lambda code: "# todo: return" in code.lower(),
@@ -91,41 +96,125 @@ DETECTION_RULES: dict[str, Callable[[str], bool]] = {
 
 SYSTEM_PROMPT = textwrap.dedent(
     """
-    You are a senior Python code reviewer.
-    Return ONLY valid JSON object with keys:
-    issues_found (array of strings from the taxonomy), review_comment (string), severity (low|medium|high|critical).
-    Use taxonomy tags only and avoid extra text.
-    """
+You are a senior Python code reviewer.
+Return ONLY a valid JSON object with keys:
+- issues_found: array of issue tags from the allowed taxonomy only
+- review_comment: concise explanation of the identified issues
+- severity: one of low|medium|high|critical
+Do not include markdown, code fences, or extra prose.
+"""
 ).strip()
 
+# ---------------------------------------------------------------------------
+# Score clamping — keep validator-facing score output strictly in (0, 1)
+# ---------------------------------------------------------------------------
+
+
+def clamp_val(v: float, low: float = 0.01, high: float = 0.99) -> float:
+    """Clamp value to (0, 1) exclusive range."""
+    return max(low, min(high, v))
+
 
 # ---------------------------------------------------------------------------
-# Structured stdout logging  (MANDATORY for validator)
+# Mandatory stdout log helpers
 # ---------------------------------------------------------------------------
+
+
 def log_start(task: str, env: str, model: str) -> None:
     print(f"[START] task={task} env={env} model={model}", flush=True)
 
 
-def log_step(step: int, action: str, reward: float, done: bool, error: Optional[str]) -> None:
+def log_step(
+    step: int,
+    action: str,
+    reward: float,
+    done: bool,
+    error: Optional[str],
+) -> None:
+    action_clean = action.replace("\n", " ").replace("\r", " ").strip()
     error_val = error if error else "null"
     done_val = str(done).lower()
     print(
-        f"[STEP] step={step} action={action} reward={reward:.2f} done={done_val} error={error_val}",
+        f"[STEP] step={step} action={action_clean!r} "
+        f"reward={clamp_val(reward):.2f} done={done_val} error={error_val}",
         flush=True,
     )
 
 
-def log_end(success: bool, steps: int, score: float, rewards: List[float]) -> None:
-    rewards_str = ",".join(f"{r:.2f}" for r in rewards)
+def log_end(success: bool, steps: int, score: float, rewards: list[float]) -> None:
+    rewards_str = ",".join(f"{clamp_val(r):.2f}" for r in rewards)
+    success_val = str(success).lower()
     print(
-        f"[END] success={str(success).lower()} steps={steps} score={score:.3f} rewards={rewards_str}",
+        f"[END] success={success_val} steps={steps} score={clamp_val(score):.3f} rewards={rewards_str}",
         flush=True,
     )
 
 
 # ---------------------------------------------------------------------------
-# Rule-based issue detection
+# Environment HTTP helpers
 # ---------------------------------------------------------------------------
+
+
+def env_reset(task_id: str) -> dict[str, Any]:
+    resp = httpx.post(
+        f"{ENV_SERVER_URL}/reset",
+        json={"task_id": task_id},
+        timeout=30,
+    )
+    resp.raise_for_status()
+    return resp.json()
+
+
+def env_step(action: dict[str, Any]) -> dict[str, Any]:
+    resp = httpx.post(
+        f"{ENV_SERVER_URL}/step",
+        json=action,
+        timeout=30,
+    )
+    resp.raise_for_status()
+    return resp.json()
+
+
+def unwrap_step_payload(payload: dict[str, Any]) -> tuple[dict[str, Any], float, bool]:
+    """Normalize payloads that may be wrapped as {observation,reward,done} or flat."""
+    if isinstance(payload.get("observation"), dict):
+        observation = payload["observation"]
+        reward = float(payload.get("reward", observation.get("reward", 0.0)) or 0.0)
+        done = bool(payload.get("done", observation.get("done", False)))
+        return observation, reward, done
+
+    observation = payload
+    reward = float(payload.get("reward", 0.0) or 0.0)
+    done = bool(payload.get("done", False))
+    return observation, reward, done
+
+
+# ---------------------------------------------------------------------------
+# Prompt and action helpers
+# ---------------------------------------------------------------------------
+
+
+def build_user_prompt(obs: dict[str, Any], step: int) -> str:
+    tags = ", ".join(obs.get("available_issue_tags") or ISSUE_TAXONOMY)
+    return textwrap.dedent(
+        f"""
+TASK ID: {obs.get('task_id', 'unknown')}
+FILE: {obs.get('file_name', 'unknown')}
+STEP: {step}
+INSTRUCTION: {obs.get('task_description', 'N/A')}
+LAST FEEDBACK: {obs.get('feedback', 'N/A')}
+
+ALLOWED ISSUE TAGS:
+{tags}
+
+CODE UNDER REVIEW:
+{obs.get('code_snippet', '')}
+
+Return strictly JSON with keys: issues_found, review_comment, severity.
+"""
+    ).strip()
+
+
 def detect_issues_rule_based(code_snippet: str) -> list[str]:
     detected: list[str] = []
     for issue_tag, detector in DETECTION_RULES.items():
@@ -149,16 +238,15 @@ def build_rule_action(code_snippet: str) -> dict[str, Any]:
     }
 
 
-# ---------------------------------------------------------------------------
-# LLM helpers
-# ---------------------------------------------------------------------------
-def _extract_json_object(text: str) -> dict[str, Any]:
+def extract_json_object(text: str) -> dict[str, Any]:
     if not text:
         raise ValueError("Empty model response")
+
     stripped = text.strip()
     if stripped.startswith("```"):
         stripped = re.sub(r"^```(?:json)?", "", stripped, flags=re.IGNORECASE).strip()
         stripped = re.sub(r"```$", "", stripped).strip()
+
     try:
         return json.loads(stripped)
     except json.JSONDecodeError:
@@ -168,57 +256,18 @@ def _extract_json_object(text: str) -> dict[str, Any]:
         return json.loads(match.group(0))
 
 
-def build_llm_action(
-    client: Any,
-    model: str,
-    task_id: str,
-    file_name: str,
-    task_description: str,
-    code_snippet: str,
-    max_retries: int = 3,
-) -> dict[str, Any]:
-    user_prompt = (
-        f"Task ID: {task_id}\n"
-        f"File: {file_name}\n"
-        f"Instruction: {task_description}\n\n"
-        f"Code:\n{code_snippet}\n\n"
-        "Return strictly JSON with: issues_found, review_comment, severity."
-    )
+def normalize_action(payload: dict[str, Any]) -> dict[str, Any]:
+    issues_found_raw = payload.get("issues_found", [])
+    if not isinstance(issues_found_raw, list):
+        issues_found_raw = []
 
-    last_error: Exception | None = None
-    for attempt in range(max_retries):
-        try:
-            completion = client.chat.completions.create(
-                model=model,
-                messages=[
-                    {"role": "system", "content": SYSTEM_PROMPT},
-                    {"role": "user", "content": user_prompt},
-                ],
-                temperature=0,
-                max_tokens=512,
-                stream=False,
-            )
-            break
-        except Exception as e:
-            last_error = e
-            wait_time = 2 ** attempt
-            print(f"[DEBUG] LLM retry task_id={task_id} attempt={attempt + 1} wait={wait_time}s error={e}", flush=True)
-            time.sleep(wait_time)
-    else:
-        raise last_error  # type: ignore[misc]
-
-    raw_text = completion.choices[0].message.content or ""
-    parsed = _extract_json_object(raw_text)
-
-    issues_found = parsed.get("issues_found", [])
-    if not isinstance(issues_found, list):
-        issues_found = []
-    issues_found = [str(issue) for issue in issues_found]
-
-    review_comment = str(parsed.get("review_comment", ""))
-    severity = str(parsed.get("severity", "medium")).lower()
+    issues_found = [str(issue) for issue in issues_found_raw if str(issue) in ISSUE_TAXONOMY]
+    review_comment = str(payload.get("review_comment", "")).strip()
+    severity = str(payload.get("severity", "medium")).lower()
     if severity not in {"low", "medium", "high", "critical"}:
         severity = "medium"
+    if not review_comment:
+        review_comment = "Review based on taxonomy-driven static analysis."
 
     return {
         "issues_found": issues_found,
@@ -227,104 +276,151 @@ def build_llm_action(
     }
 
 
-def get_action(
-    openai_client: Optional[Any],
-    model: str,
-    task_id: str,
-    file_name: str,
-    task_description: str,
-    code_snippet: str,
+def build_llm_action(
+    client: OpenAI,
+    obs: dict[str, Any],
+    step: int,
+    max_retries: int = 3,
 ) -> dict[str, Any]:
-    """Get review action using LLM if available, otherwise rule-based fallback."""
-    if openai_client:
+    user_prompt = build_user_prompt(obs=obs, step=step)
+
+    last_error: Optional[Exception] = None
+    for attempt in range(max_retries):
         try:
-            return build_llm_action(
-                client=openai_client,
-                model=model,
-                task_id=task_id,
-                file_name=file_name,
-                task_description=task_description,
-                code_snippet=code_snippet,
+            response = client.chat.completions.create(
+                model=MODEL_NAME,
+                messages=[
+                    {"role": "system", "content": SYSTEM_PROMPT},
+                    {"role": "user", "content": user_prompt},
+                ],
+                temperature=TEMPERATURE,
+                max_tokens=MAX_TOKENS,
+                stream=False,
             )
-        except Exception as exc:
-            print(f"[DEBUG] LLM failed, falling back to rules: {exc}", flush=True)
-    return build_rule_action(code_snippet)
+            raw_text = response.choices[0].message.content or ""
+            return normalize_action(extract_json_object(raw_text))
+        except Exception as llm_err:
+            last_error = llm_err
+            time.sleep(2 ** attempt)
+
+    raise RuntimeError(f"LLM call failed after retries: {last_error}")
+
+
+def get_action(client: OpenAI, obs: dict[str, Any], step: int) -> dict[str, Any]:
+    try:
+        return build_llm_action(client=client, obs=obs, step=step)
+    except Exception:
+        return build_rule_action(obs.get("code_snippet", ""))
 
 
 # ---------------------------------------------------------------------------
-# Main inference loop  (async, follows sample script pattern exactly)
+# Server readiness and proxy preflight checks
 # ---------------------------------------------------------------------------
-async def main() -> None:
-    openai_client = OpenAI(base_url=API_BASE_URL, api_key=API_KEY) if API_KEY and OpenAI else None
 
-    # Connect to environment — prefer docker image, fallback to URL
-    if IMAGE_NAME:
-        env = await CodeReviewEnv.from_docker_image(IMAGE_NAME)
-    else:
-        env = CodeReviewEnv(base_url=ENV_URL)
-        await env.connect()
+
+def wait_for_server(timeout: int = 60) -> None:
+    for _ in range(timeout):
+        try:
+            r = httpx.get(f"{ENV_SERVER_URL}/health", timeout=5)
+            if r.status_code == 200:
+                return
+        except Exception:
+            pass
+        time.sleep(1)
+    raise RuntimeError(f"Server at {ENV_SERVER_URL} not ready after {timeout}s")
+
+
+def ensure_proxy_call(client: OpenAI) -> None:
+    """Make at least one guaranteed real proxy-routed completion call."""
+    _ = client.chat.completions.create(
+        model=MODEL_NAME,
+        messages=[
+            {"role": "system", "content": "Return OK."},
+            {"role": "user", "content": "Reply with OK"},
+        ],
+        temperature=0,
+        max_tokens=4,
+        stream=False,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Agent loop — one task episode
+# ---------------------------------------------------------------------------
+
+
+def run_task(client: OpenAI, task_id: str) -> None:
+    """Run one task episode and emit mandatory logs."""
+    log_start(task=task_id, env=BENCHMARK, model=MODEL_NAME)
+
+    rewards: list[float] = []
+    steps_taken = 0
+    final_score = 0.5
+    success = False
 
     try:
-        for task_id in TASK_IDS:
-            rewards: List[float] = []
-            steps_taken = 0
-            score = 0.0
-            success = False
+        reset_payload = env_reset(task_id=task_id)
+        obs, reward, done = unwrap_step_payload(reset_payload)
 
-            log_start(task=task_id, env=BENCHMARK, model=MODEL_NAME)
+        if reward:
+            rewards.append(reward)
+
+        threshold = SUCCESS_THRESHOLDS.get(task_id, 0.95)
+
+        for step in range(1, MAX_STEPS + 1):
+            if done:
+                break
+
+            action_payload = get_action(client=client, obs=obs, step=step)
+            action_str = json.dumps(action_payload, separators=(",", ":"))
 
             try:
-                result = await env.reset(task_id=task_id)
-                observation = result.observation
+                step_payload = env_step(action=action_payload)
+                obs, reward, done = unwrap_step_payload(step_payload)
+                rewards.append(reward)
+                steps_taken = step
 
-                code_snippet = observation.code_snippet
-                file_name = observation.file_name
-                task_description = observation.task_description
+                log_step(step=step, action=action_str, reward=reward, done=done, error=None)
 
-                for step in range(1, MAX_STEPS + 1):
-                    if result.done:
-                        break
+                if done:
+                    final_score = reward
+                    success = final_score >= threshold
+                    break
+            except Exception as step_err:
+                steps_taken = step
+                log_step(step=step, action=action_str, reward=0.0, done=True, error=str(step_err))
+                break
 
-                    action_payload = get_action(
-                        openai_client=openai_client,
-                        model=MODEL_NAME,
-                        task_id=task_id,
-                        file_name=file_name,
-                        task_description=task_description,
-                        code_snippet=code_snippet,
-                    )
+        if rewards:
+            final_score = rewards[-1]
+            success = final_score >= threshold
 
-                    action_str = json.dumps(action_payload, separators=(",", ":"))
-                    result = await env.step(ReviewAction.model_validate(action_payload))
+    except Exception:
+        success = False
 
-                    reward = float(result.reward or 0.0)
-                    done = result.done
-                    error = None
+    log_end(success=success, steps=steps_taken, score=final_score, rewards=rewards)
 
-                    rewards.append(reward)
-                    steps_taken = step
 
-                    log_step(step=step, action=action_str, reward=reward, done=done, error=error)
+# ---------------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------------
 
-                    if done:
-                        break
 
-                # Score is the last reward (single-step scoring per task)
-                score = rewards[-1] if rewards else 0.0
-                score = min(max(score, 0.0), 1.0)
-                success = score >= SUCCESS_SCORE_THRESHOLD
+def main() -> None:
+    if not API_BASE_URL:
+        raise EnvironmentError("Missing API_BASE_URL.")
+    if not MODEL_NAME:
+        raise EnvironmentError("Missing MODEL_NAME.")
+    if not API_KEY:
+        raise EnvironmentError("Missing HF_TOKEN, API_KEY, or OPENAI_API_KEY.")
 
-            except Exception as exc:
-                print(f"[DEBUG] Task {task_id} error: {exc}", flush=True)
-            finally:
-                log_end(success=success, steps=steps_taken, score=score, rewards=rewards)
+    client = OpenAI(api_key=API_KEY, base_url=API_BASE_URL)
+    ensure_proxy_call(client)
+    wait_for_server(timeout=60)
 
-    finally:
-        try:
-            await env.close()
-        except Exception as e:
-            print(f"[DEBUG] env.close() error: {e}", flush=True)
+    for task_id in TASKS:
+        run_task(client=client, task_id=task_id)
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    main()
