@@ -43,15 +43,16 @@ import urllib.error
 # Configuration — fully environment-driven
 # ---------------------------------------------------------------------------
 
-API_BASE_URL: str = os.getenv("API_BASE_URL", "https://router.huggingface.co/v1")
+API_BASE_URL: str = os.environ.get("API_BASE_URL", "https://router.huggingface.co/v1")
 API_KEY: str = (
-    os.getenv("API_KEY")
-    or os.getenv("HF_TOKEN")
-    or os.getenv("OPENAI_API_KEY")
+    os.environ.get("API_KEY")
+    or os.environ.get("HF_TOKEN")
+    or os.environ.get("OPENAI_API_KEY")
     or "missing-api-key"
 )
-MODEL_NAME: str = os.getenv("MODEL_NAME", "")
-ENV_SERVER_URL: str = os.getenv("ENV_SERVER_URL", "http://localhost:8000")
+# Provide fallback explicitly instead of an empty string
+MODEL_NAME: str = os.environ.get("MODEL_NAME", "Qwen/Qwen2.5-72B-Instruct")
+ENV_SERVER_URL: str = os.environ.get("ENV_SERVER_URL", "http://localhost:8000")
 
 BENCHMARK = "code_review_env"
 TASKS = ["task_easy", "task_medium", "task_hard"]
@@ -312,7 +313,7 @@ def get_action(client: Any, obs: dict[str, Any], step: int) -> dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
-# Server readiness and proxy preflight checks
+# Server readiness
 # ---------------------------------------------------------------------------
 
 
@@ -327,25 +328,6 @@ def wait_for_server(timeout: int = 60) -> None:
             pass
         time.sleep(1)
     raise RuntimeError(f"Server at {ENV_SERVER_URL} not ready after {timeout}s")
-
-
-def ensure_proxy_call(client: Any) -> None:
-    """Make at least one guaranteed real proxy-routed completion call."""
-    if client is None:
-        return
-    try:
-        _ = client.chat.completions.create(
-            model=MODEL_NAME,
-            messages=[
-                {"role": "system", "content": "Return OK."},
-                {"role": "user", "content": "Reply with OK"},
-            ],
-            temperature=0,
-            max_tokens=4,
-            stream=False,
-        )
-    except Exception:
-        pass
 
 
 # ---------------------------------------------------------------------------
@@ -414,10 +396,16 @@ def main() -> None:
     client = None
     try:
         from openai import OpenAI
-        client = OpenAI(base_url=API_BASE_URL, api_key=API_KEY or "missing-api-key")
-        ensure_proxy_call(client)
-    except Exception:
-        pass
+        
+        # Dynamically fetch at runtime to prevent caching via import loops
+        val_api_base = os.environ.get("API_BASE_URL", "https://router.huggingface.co/v1")
+        val_api_key = os.environ.get("API_KEY") or os.environ.get("HF_TOKEN") or "missing-api-key"
+
+        client = OpenAI(base_url=val_api_base, api_key=val_api_key)
+    except Exception as e:
+        import sys
+        print(f"[WARN] Failed to initialize OpenAI client: {e}", file=sys.stderr)
+        client = None
 
     wait_for_server(timeout=60)
 
