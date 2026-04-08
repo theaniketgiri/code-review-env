@@ -275,43 +275,6 @@ def normalize_action(payload: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def build_llm_action(
-    client: Any,
-    obs: dict[str, Any],
-    step: int,
-    max_retries: int = 3,
-) -> dict[str, Any]:
-    user_prompt = build_user_prompt(obs=obs, step=step)
-
-    last_error: Optional[Exception] = None
-    for attempt in range(max_retries):
-        try:
-            response = client.chat.completions.create(
-                model=MODEL_NAME,
-                messages=[
-                    {"role": "system", "content": SYSTEM_PROMPT},
-                    {"role": "user", "content": user_prompt},
-                ],
-                temperature=TEMPERATURE,
-                max_tokens=MAX_TOKENS,
-                stream=False,
-            )
-            raw_text = response.choices[0].message.content or ""
-            return normalize_action(extract_json_object(raw_text))
-        except Exception as llm_err:
-            last_error = llm_err
-            time.sleep(2 ** attempt)
-
-    raise RuntimeError(f"LLM call failed after retries: {last_error}")
-
-
-def get_action(client: Any, obs: dict[str, Any], step: int) -> dict[str, Any]:
-    try:
-        return build_llm_action(client=client, obs=obs, step=step)
-    except Exception:
-        return build_rule_action(obs.get("code_snippet", ""))
-
-
 # ---------------------------------------------------------------------------
 # Server readiness
 # ---------------------------------------------------------------------------
@@ -328,6 +291,47 @@ def wait_for_server(timeout: int = 60) -> None:
             pass
         time.sleep(1)
     raise RuntimeError(f"Server at {ENV_SERVER_URL} not ready after {timeout}s")
+
+
+# ---------------------------------------------------------------------------
+# Pure urllib OpenAI Client Implementation
+# ---------------------------------------------------------------------------
+
+
+class PureUrllibOpenAIClient:
+    def __init__(self, base_url: str, api_key: str):
+        self.base_url = base_url.rstrip("/")
+        self.api_key = api_key
+
+    def create_chat_completion(
+        self,
+        model: str,
+        messages: list[dict[str, str]],
+        temperature: float = 0.0,
+        max_tokens: int = 512,
+    ) -> str:
+        url = f"{self.base_url}/chat/completions"
+        payload = {
+            "model": model,
+            "messages": messages,
+            "temperature": temperature,
+            "max_tokens": max_tokens,
+            "stream": False,
+        }
+        data = json.dumps(payload).encode("utf-8")
+        req = urllib.request.Request(url, data=data, method="POST")
+        req.add_header("Content-Type", "application/json")
+        req.add_header("Authorization", f"Bearer {self.api_key}")
+
+        try:
+            with urllib.request.urlopen(req, timeout=60) as response:
+                result = json.loads(response.read().decode("utf-8"))
+                return result.get("choices", [{}])[0].get("message", {}).get("content", "")
+        except urllib.error.HTTPError as e:
+            error_body = e.read().decode("utf-8")
+            raise RuntimeError(f"HTTP {e.code}: {error_body}")
+        except Exception as e:
+            raise RuntimeError(f"Proxy request failed: {e}")
 
 
 # ---------------------------------------------------------------------------
@@ -357,6 +361,7 @@ def run_task(client: Any, task_id: str) -> None:
             if done:
                 break
 
+            # If client is our PureUrllib wrapper, adapt the payload build logic
             action_payload = get_action(client=client, obs=obs, step=step)
             action_str = json.dumps(action_payload, separators=(",", ":"))
 
@@ -387,25 +392,73 @@ def run_task(client: Any, task_id: str) -> None:
     log_end(success=success, steps=steps_taken, score=final_score, rewards=rewards)
 
 
+def build_llm_action(
+    client: Any,
+    obs: dict[str, Any],
+    step: int,
+    max_retries: int = 3,
+) -> dict[str, Any]:
+    user_prompt = build_user_prompt(obs=obs, step=step)
+
+    last_error: Optional[Exception] = None
+    for attempt in range(max_retries):
+        try:
+            if isinstance(client, PureUrllibOpenAIClient):
+                raw_text = client.create_chat_completion(
+                    model=MODEL_NAME,
+                    messages=[
+                        {"role": "system", "content": SYSTEM_PROMPT},
+                        {"role": "user", "content": user_prompt},
+                    ],
+                    temperature=TEMPERATURE,
+                    max_tokens=MAX_TOKENS,
+                )
+            else:
+                response = client.chat.completions.create(
+                    model=MODEL_NAME,
+                    messages=[
+                        {"role": "system", "content": SYSTEM_PROMPT},
+                        {"role": "user", "content": user_prompt},
+                    ],
+                    temperature=TEMPERATURE,
+                    max_tokens=MAX_TOKENS,
+                    stream=False,
+                )
+                raw_text = response.choices[0].message.content or ""
+            
+            return normalize_action(extract_json_object(raw_text))
+        except Exception as llm_err:
+            last_error = llm_err
+            time.sleep(2 ** attempt)
+
+    raise RuntimeError(f"LLM call failed after retries: {last_error}")
+
+
+def get_action(client: Any, obs: dict[str, Any], step: int) -> dict[str, Any]:
+    try:
+        return build_llm_action(client=client, obs=obs, step=step)
+    except Exception:
+        return build_rule_action(obs.get("code_snippet", ""))
+
+
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
 
 def main() -> None:
+    # Dynamically fetch at runtime to prevent caching via import loops
+    val_api_base = os.environ.get("API_BASE_URL", "https://router.huggingface.co/v1")
+    val_api_key = os.environ.get("API_KEY") or os.environ.get("HF_TOKEN") or "missing-api-key"
+
     client = None
     try:
         from openai import OpenAI
-        
-        # Dynamically fetch at runtime to prevent caching via import loops
-        val_api_base = os.environ.get("API_BASE_URL", "https://router.huggingface.co/v1")
-        val_api_key = os.environ.get("API_KEY") or os.environ.get("HF_TOKEN") or "missing-api-key"
-
         client = OpenAI(base_url=val_api_base, api_key=val_api_key)
     except Exception as e:
         import sys
-        print(f"[WARN] Failed to initialize OpenAI client: {e}", file=sys.stderr)
-        client = None
+        print(f"[WARN] Failed to load openai pip, using fallback urllib REST client: {e}", file=sys.stderr)
+        client = PureUrllibOpenAIClient(base_url=val_api_base, api_key=val_api_key)
 
     wait_for_server(timeout=60)
 
