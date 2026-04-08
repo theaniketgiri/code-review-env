@@ -45,9 +45,10 @@ import urllib.error
 
 API_BASE_URL: str = os.getenv("API_BASE_URL", "https://router.huggingface.co/v1")
 API_KEY: str = (
-    os.getenv("HF_TOKEN")
-    or os.getenv("API_KEY")
-    or os.getenv("OPENAI_API_KEY", "")
+    os.getenv("API_KEY")
+    or os.getenv("HF_TOKEN")
+    or os.getenv("OPENAI_API_KEY")
+    or "missing-api-key"
 )
 MODEL_NAME: str = os.getenv("MODEL_NAME", "")
 ENV_SERVER_URL: str = os.getenv("ENV_SERVER_URL", "http://localhost:8000")
