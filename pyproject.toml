@@ -48,3 +48,7 @@ server = "code_review_env.server.app:main"
 include-package-data = true
 packages = ["code_review_env", "code_review_env.server"]
 package-dir = { "code_review_env" = ".", "code_review_env.server" = "server" }
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]

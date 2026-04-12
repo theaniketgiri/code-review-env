@@ -55,6 +55,10 @@ class GraderRequest(BaseModel):
         default="",
         description="Free-text review comment submitted by the agent.",
     )
+    severity: str = Field(
+        default="medium",
+        description="Agent-assessed severity level.",
+    )
 
 
 class GraderResponse(BaseModel):
@@ -76,6 +80,13 @@ DETECTION_RULES: dict[str, Callable[[str], bool]] = {
     "race_condition": lambda code: "balance -=" in code or "balance +=" in code,
     "timing_attack": lambda code: "if expected ==" in code or "== actual" in code,
     "improper_error_handling": lambda code: "except:\n" in code or "except:\r\n" in code,
+    "index_out_of_bounds": lambda code: "len(" in code and ("[" in code or "range(" in code),
+    "type_error": lambda code: "int(" in code and "str" in code.lower(),
+    "integer_overflow": lambda code: "2 ** 31" in code or "overflow" in code.lower(),
+    "path_traversal": lambda code: "os.path.join" in code and "user" in code.lower(),
+    "missing_input_validation": lambda code: (
+        "open(" in code and "user" in code.lower() and "valid" not in code.lower()
+    ),
 }
 
 
@@ -112,7 +123,7 @@ def list_tasks() -> dict:
 @app.post("/grader", response_model=GraderResponse)
 def grade_endpoint(payload: GraderRequest) -> GraderResponse:
     task = get_task(payload.task_id)
-    score = grade_review(payload.issues_found, payload.review_comment, task)
+    score = grade_review(payload.issues_found, payload.review_comment, task, payload.severity)
     return GraderResponse(task_id=task.task_id, score=score)
 
 
@@ -291,7 +302,8 @@ with gr.Blocks(theme=hf_theme, title="Code Review Environment Dashboard") as cus
         
                 with gr.Column(scale=4):
                     gr.Markdown("### Agent Output Sandbox")
-                    agent_issues = gr.CheckboxGroup(label="Taxonomy Tags Outputted by Agent", choices=list(DETECTION_RULES.keys()))
+                    from models import ISSUE_TAXONOMY as _ALL_TAGS
+                    agent_issues = gr.CheckboxGroup(label="Taxonomy Tags Outputted by Agent", choices=_ALL_TAGS)
                     agent_comment = gr.Textbox(label="Agent Review Comment", lines=3, placeholder="The agent's freeform text response goes here...")
                     
                     with gr.Row():

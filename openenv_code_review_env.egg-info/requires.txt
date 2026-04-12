@@ -1,0 +1,10 @@
+openenv-core[core]>=0.2.2
+openai>=1.0
+httpx>=0.24.0
+plotly>=6.6.0
+pandas>=2.3.3
+requests>=2.31.0
+
+[dev]
+pytest>=8.0.0
+pytest-cov>=4.0.0

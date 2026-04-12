@@ -17,6 +17,31 @@ class Task:
 
 
 TASKS: dict[str, Task] = {
+    "task_extra_easy": Task(
+        task_id="task_extra_easy",
+        difficulty="extra_easy",
+        description=(
+            "Review this Python function for a single common bug. "
+            f"Allowed tags: {', '.join(ISSUE_TAXONOMY)}."
+        ),
+        file_name="data_utils.py",
+        code=(
+            "def get_last_element(items):\n"
+            "    \"\"\"Return the last element of a list.\"\"\"\n"
+            "    # BUG: does not check if list is empty first\n"
+            "    last = items[len(items)]  # off-by-one: should be len(items) - 1\n"
+            "    return last\n"
+            "\n"
+            "\n"
+            "def compute_average(scores):\n"
+            "    \"\"\"Compute average of a list of scores.\"\"\"\n"
+            "    total = 0\n"
+            "    for i in range(len(scores) + 1):  # iterates one past the end\n"
+            "        total += scores[i]\n"
+            "    return total / len(scores)\n"
+        ),
+        planted_issues=["index_out_of_bounds"],
+    ),
     "task_easy": Task(
         task_id="task_easy",
         difficulty="easy",
@@ -89,6 +114,41 @@ TASKS: dict[str, Task] = {
             "            return {\"status\": \"success\", \"charge\": charge_result}\n"
         ),
         planted_issues=["race_condition", "improper_error_handling", "timing_attack"],
+    ),
+    "task_expert": Task(
+        task_id="task_expert",
+        difficulty="expert",
+        description=(
+            "Review this file-processing pipeline for security, type-safety, and input-validation flaws. "
+            "This task requires identifying multiple subtle interacting issues. "
+            f"Use only taxonomy tags: {', '.join(ISSUE_TAXONOMY)}."
+        ),
+        file_name="file_processor.py",
+        code=(
+            "import os\n"
+            "\n"
+            "MAX_FILE_SIZE = 2 ** 31  # 2 GB limit\n"
+            "\n"
+            "def process_upload(user_input_path, file_size_str, content):\n"
+            "    \"\"\"Process an uploaded file from the user.\"\"\"\n"
+            "    # Construct output path directly from user input\n"
+            "    output_path = os.path.join('/var/data/uploads', user_input_path)\n"
+            "    # No check: user_input_path could be '../../etc/passwd'\n"
+            "\n"
+            "    # Parse file size from string header without validation\n"
+            "    file_size = int(file_size_str)  # crashes on non-numeric input\n"
+            "\n"
+            "    # Integer overflow: if file_size_str is very large, wraps around\n"
+            "    remaining_quota = MAX_FILE_SIZE - file_size  # can go negative\n"
+            "    if remaining_quota > 0:\n"
+            "        # No validation on content type or structure\n"
+            "        with open(output_path, 'wb') as f:\n"
+            "            f.write(content)  # writes arbitrary bytes without sanitization\n"
+            "\n"
+            "    total_written = file_size + len(content)  # may overflow for huge files\n"
+            "    return {'path': output_path, 'bytes_written': total_written}\n"
+        ),
+        planted_issues=["path_traversal", "integer_overflow", "missing_input_validation", "type_error"],
     ),
 }
 

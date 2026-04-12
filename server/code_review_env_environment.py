@@ -66,26 +66,54 @@ class CodeReviewEnvironment(Environment):
         )
 
     def step(self, action: ReviewAction) -> ReviewObservation:  # type: ignore[override]
-        """Grade one review action and return updated observation."""
+        """Grade one review action and return updated observation with refinement feedback."""
         self._state.step_count += 1
 
         breakdown = grade_review_with_breakdown(
             action_issues=action.issues_found,
             action_comment=action.review_comment,
             task=self._current_task,
+            action_severity=action.severity,
         )
 
         score = breakdown.score
+
+        # Track best score across steps (iterative refinement)
+        self._state.best_score = max(self._state.best_score, score)
+
         done = (score >= 0.95) or (self._state.step_count >= MAX_STEPS)
 
         correctly_found = sorted(breakdown.correctly_found)
-        missed_count = len(breakdown.missed)
+        missed_tags = sorted(breakdown.missed)
+        missed_count = len(missed_tags)
         false_positive_count = len(breakdown.false_positives)
 
-        feedback = (
-            f"Score: {score:.3f} | Found: {correctly_found} | "
-            f"Missed: {missed_count} remaining | False positives: {false_positive_count}"
-        )
+        # Iterative refinement feedback: tell agent what to improve
+        feedback_parts = [
+            f"Score: {score:.3f}",
+            f"Found: {correctly_found}",
+            f"Missed: {missed_count} remaining",
+            f"False positives: {false_positive_count}",
+        ]
+        if not done and missed_count > 0:
+            # Give hints about missed categories without revealing exact tags
+            hint_categories = []
+            for tag in missed_tags:
+                if tag in ("null_pointer", "missing_return", "type_error", "index_out_of_bounds"):
+                    hint_categories.append("logic/type issue")
+                elif tag in ("sql_injection", "hardcoded_secret", "path_traversal"):
+                    hint_categories.append("security vulnerability")
+                elif tag in ("race_condition", "timing_attack", "improper_error_handling"):
+                    hint_categories.append("robustness/concurrency flaw")
+                elif tag in ("integer_overflow", "missing_input_validation"):
+                    hint_categories.append("input handling issue")
+            unique_hints = sorted(set(hint_categories))
+            feedback_parts.append(f"Hint: look for {', '.join(unique_hints)}")
+
+        if not breakdown.severity_correct:
+            feedback_parts.append("Severity assessment could be improved")
+
+        feedback = " | ".join(feedback_parts)
 
         return ReviewObservation(
             task_id=self._current_task.task_id,
@@ -98,9 +126,13 @@ class CodeReviewEnvironment(Environment):
             done=done,
             metadata={
                 "correctly_found": correctly_found,
-                "missed": sorted(breakdown.missed),
+                "missed": missed_tags,
                 "false_positives": sorted(breakdown.false_positives),
                 "submitted_severity": action.severity,
+                "severity_correct": breakdown.severity_correct,
+                "best_score": self._state.best_score,
+                "max_achievable_score": 1.0,
+                "steps_remaining": MAX_STEPS - self._state.step_count,
             },
         )
 

@@ -93,6 +93,10 @@ class ReviewState(State):
         default=3,
         description="Maximum number of review attempts allowed in one episode.",
     )
+    best_score: float = Field(
+        default=0.0,
+        description="Highest score achieved across all steps in this episode.",
+    )
 
 
 # Backward-compatible aliases while migrating scaffolded files.
